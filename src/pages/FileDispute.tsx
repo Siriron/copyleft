@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { parseEther } from 'genlayer-js/utils';
+import { parseEther } from 'viem';
 import { useCopyleftContract } from '../lib/useCopyleft';
 import { NetworkKey } from '../config/chains';
 
