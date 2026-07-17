@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: auto;
+  }
+
+  body {
+    @apply bg-paper text-ink font-body antialiased;
+    background-color: #EAEBE3;
+  }
+
+  ::selection {
+    background-color: #A47C1B;
+    color: #EAEBE3;
+  }
+
+  :focus-visible {
+    outline: 2px solid #A47C1B;
+    outline-offset: 2px;
+  }
+
+  h1, h2, h3 {
+    @apply font-display;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Fine ruled-paper texture used sparingly behind hero content */
+.register-lines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 35px,
+    rgba(18, 37, 62, 0.045) 35px,
+    rgba(18, 37, 62, 0.045) 36px
+  );
+}
+
+.diff-add {
+  background-color: rgba(46, 107, 79, 0.14);
+  color: #1F4A38;
+}
+
+.diff-remove {
+  background-color: rgba(139, 30, 30, 0.12);
+  color: #6E1717;
+  text-decoration: line-through;
+  text-decoration-color: rgba(139, 30, 30, 0.5);
+}
+
+.stamp-seal {
+  filter: drop-shadow(0 1px 0 rgba(18, 37, 62, 0.15));
+}
