@@ -236,17 +236,29 @@ export default function DisputeDetail({ network, account, onConnect }: Props) {
             >
               {txPending ? 'Submitting…' : account ? 'Counter-stake & Rebut' : 'Connect Wallet to Rebut'}
             </button>
+            {txPending && (
+              <p className="mt-2 text-center text-xs text-ink/45">
+                Waiting for validator consensus — this can take a few minutes.
+              </p>
+            )}
           </div>
         )}
 
         {dispute.status === 'rebutted' && (
-          <button
-            onClick={handleResolve}
-            disabled={txPending}
-            className="w-full rounded-full bg-ink px-6 py-3 text-sm font-semibold text-paper-50 disabled:opacity-50"
-          >
-            {txPending ? 'Resolving…' : account ? 'Run Consensus Resolution' : 'Connect Wallet to Resolve'}
-          </button>
+          <div>
+            <button
+              onClick={handleResolve}
+              disabled={txPending}
+              className="w-full rounded-full bg-ink px-6 py-3 text-sm font-semibold text-paper-50 disabled:opacity-50"
+            >
+              {txPending ? 'Resolving…' : account ? 'Run Consensus Resolution' : 'Connect Wallet to Resolve'}
+            </button>
+            {txPending && (
+              <p className="mt-2 text-center text-xs text-ink/45">
+                Fetching evidence and running validator consensus — this can take several minutes.
+              </p>
+            )}
+          </div>
         )}
 
         {dispute.status === 'cure_pending' && (
@@ -269,6 +281,11 @@ export default function DisputeDetail({ network, account, onConnect }: Props) {
             >
               {txPending ? 'Submitting…' : account ? 'Submit Cure' : 'Connect Wallet to Submit'}
             </button>
+            {txPending && (
+              <p className="mt-2 text-center text-xs text-ink/45">
+                Re-fetching evidence and re-judging — this can take a few minutes.
+              </p>
+            )}
           </div>
         )}
       </div>

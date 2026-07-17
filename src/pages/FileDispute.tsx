@@ -173,6 +173,11 @@ export default function FileDispute({ network, account, onConnect }: Props) {
         >
           {submitting ? 'Filing…' : account ? 'Stake & File Dispute' : 'Connect Wallet to File'}
         </button>
+        {submitting && (
+          <p className="text-center text-xs text-ink/45">
+            Waiting for the network to confirm — this can take a few minutes.
+          </p>
+        )}
       </form>
     </div>
   );
