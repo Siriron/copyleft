@@ -1,12 +1,33 @@
 import { useCallback, useEffect, useState } from 'react';
 import { TransactionStatus } from 'genlayer-js/types';
 import { getReadClient, getWriteClient, getContractAddress, ensureChain } from './genlayerClient';
-import { NetworkKey } from '../config/chains';
+import { NETWORKS, NetworkKey } from '../config/chains';
 
 const CONNECT_NAME: Record<NetworkKey, string> = {
   studionet: 'studionet',
   bradbury: 'testnetBradbury',
 };
+
+// GenLayer consensus (propose → commit → reveal → accept across multiple
+// validators) genuinely takes real time — it is not an instant chain write.
+// The SDK's default retry/interval is too short for that, which caused a
+// confirmed live "Timed out waiting for transaction... to reach status
+// ACCEPTED" error on a real, correctly-submitted rebuttal (Jul 17 2026).
+// These values mirror Sigil's confirmed-working config.
+const RECEIPT_CONFIG: Record<NetworkKey, { retries: number; interval: number }> = {
+  studionet: { retries: 120, interval: 4000 },  // up to ~8 min
+  bradbury: { retries: 240, interval: 6000 },   // up to ~24 min
+};
+
+function timeoutError(network: NetworkKey, hash: string): Error {
+  const base = NETWORKS[network].explorerUrl;
+  const err = new Error(
+    `Consensus is taking longer than expected. Your transaction was submitted — check its status directly: ${base}/tx/${hash}`
+  );
+  (err as any).txHash = hash;
+  (err as any).isTimeout = true;
+  return err;
+}
 
 export interface DisputeRecord {
   dispute_id: number;
@@ -152,7 +173,15 @@ export function useCopyleftContract(network: NetworkKey) {
         args: [args.downstreamRepoUrl, args.disputedPaths, args.licenseId, args.allegedClause, args.claimText],
         value: stakeWei,
       });
-      await client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
+      try {
+        await client.waitForTransactionReceipt({
+          hash,
+          status: TransactionStatus.ACCEPTED,
+          ...RECEIPT_CONFIG[network],
+        });
+      } catch {
+        throw timeoutError(network, hash);
+      }
       return hash;
     } catch (e: any) {
       setError(e?.message || 'Failed to file dispute');
@@ -179,7 +208,15 @@ export function useCopyleftContract(network: NetworkKey) {
         args: [disputeId, counterEvidenceUrl, rebuttalText],
         value: stakeWei,
       });
-      await client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
+      try {
+        await client.waitForTransactionReceipt({
+          hash,
+          status: TransactionStatus.ACCEPTED,
+          ...RECEIPT_CONFIG[network],
+        });
+      } catch {
+        throw timeoutError(network, hash);
+      }
       return hash;
     } catch (e: any) {
       setError(e?.message || 'Failed to submit rebuttal');
@@ -200,7 +237,15 @@ export function useCopyleftContract(network: NetworkKey) {
         args: [disputeId],
         value: BigInt(0),
       });
-      await client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
+      try {
+        await client.waitForTransactionReceipt({
+          hash,
+          status: TransactionStatus.ACCEPTED,
+          ...RECEIPT_CONFIG[network],
+        });
+      } catch {
+        throw timeoutError(network, hash);
+      }
       return hash;
     } catch (e: any) {
       setError(e?.message || 'Failed to resolve dispute');
@@ -221,7 +266,15 @@ export function useCopyleftContract(network: NetworkKey) {
         args: [disputeId, cureCommitUrl],
         value: BigInt(0),
       });
-      await client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
+      try {
+        await client.waitForTransactionReceipt({
+          hash,
+          status: TransactionStatus.ACCEPTED,
+          ...RECEIPT_CONFIG[network],
+        });
+      } catch {
+        throw timeoutError(network, hash);
+      }
       return hash;
     } catch (e: any) {
       setError(e?.message || 'Failed to request cure');
