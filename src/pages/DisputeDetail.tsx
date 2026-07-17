@@ -23,8 +23,11 @@ function Row({ label, value }: { label: string; value: string }) {
 
 export default function DisputeDetail({ network, account, onConnect }: Props) {
   const { id } = useParams();
-  const { getDispute, resolveDispute, requestCure, loading, error } = useCopyleftContract(network);
+  const { getDispute, rebut, resolveDispute, requestCure, loading, error } = useCopyleftContract(network);
   const [dispute, setDispute] = useState<DisputeRecord | null>(null);
+  const [counterEvidenceUrl, setCounterEvidenceUrl] = useState('');
+  const [rebuttalText, setRebuttalText] = useState('');
+  const [rebutStake, setRebutStake] = useState('0.01');
   const [cureUrl, setCureUrl] = useState('');
   const [txError, setTxError] = useState<string | null>(null);
   const [txPending, setTxPending] = useState(false);
@@ -39,6 +42,28 @@ export default function DisputeDetail({ network, account, onConnect }: Props) {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, network]);
+
+  const handleRebut = async () => {
+    if (!account) return onConnect();
+    if (!counterEvidenceUrl.trim() || !rebuttalText.trim()) return;
+    setTxError(null);
+    setTxPending(true);
+    try {
+      let stakeWei: bigint;
+      try {
+        const { parseEther } = await import('viem');
+        stakeWei = parseEther(rebutStake);
+      } catch {
+        stakeWei = BigInt(Math.floor(Number(rebutStake) * 1e18));
+      }
+      await rebut(account, Number(id), counterEvidenceUrl.trim(), rebuttalText.trim(), stakeWei);
+      await refresh();
+    } catch (e: any) {
+      setTxError(e?.message || 'Rebuttal failed');
+    } finally {
+      setTxPending(false);
+    }
+  };
 
   const handleResolve = async () => {
     if (!account) return onConnect();
@@ -162,6 +187,58 @@ export default function DisputeDetail({ network, account, onConnect }: Props) {
       )}
 
       <div className="mt-8 space-y-4">
+        {dispute.status === 'filed' && (
+          <div className="rounded-lg border border-ink/10 bg-paper-50 p-5">
+            <h3 className="font-display text-base font-semibold text-ink">Submit a rebuttal</h3>
+            <p className="mt-1 text-sm text-ink/60">
+              Counter-stake and submit your own evidence. This unlocks consensus resolution.
+            </p>
+
+            <label className="mt-4 block font-mono text-[11px] uppercase tracking-wider text-ink/50">
+              Counter-evidence URL
+            </label>
+            <input
+              type="url"
+              value={counterEvidenceUrl}
+              onChange={(e) => setCounterEvidenceUrl(e.target.value)}
+              placeholder="https://github.com/org/repo/blob/main/LICENSE"
+              className="mt-1.5 w-full rounded-md border border-ink/15 bg-paper px-3 py-2.5 text-sm focus:border-seal focus:outline-none"
+            />
+
+            <label className="mt-4 block font-mono text-[11px] uppercase tracking-wider text-ink/50">
+              Rebuttal
+            </label>
+            <textarea
+              rows={4}
+              value={rebuttalText}
+              onChange={(e) => setRebuttalText(e.target.value)}
+              maxLength={2000}
+              placeholder="Explain why the claim doesn't hold, citing the counter-evidence above."
+              className="mt-1.5 w-full rounded-md border border-ink/15 bg-paper px-3 py-2.5 text-sm focus:border-seal focus:outline-none"
+            />
+
+            <label className="mt-4 block font-mono text-[11px] uppercase tracking-wider text-ink/50">
+              Counter-stake (GEN)
+            </label>
+            <input
+              type="number"
+              step="0.001"
+              min="0.001"
+              value={rebutStake}
+              onChange={(e) => setRebutStake(e.target.value)}
+              className="mt-1.5 w-40 rounded-md border border-ink/15 bg-paper px-3 py-2.5 text-sm focus:border-seal focus:outline-none"
+            />
+
+            <button
+              onClick={handleRebut}
+              disabled={txPending || !counterEvidenceUrl.trim() || !rebuttalText.trim()}
+              className="mt-4 w-full rounded-full bg-ink px-6 py-3 text-sm font-semibold text-paper-50 disabled:opacity-50"
+            >
+              {txPending ? 'Submitting…' : account ? 'Counter-stake & Rebut' : 'Connect Wallet to Rebut'}
+            </button>
+          </div>
+        )}
+
         {dispute.status === 'rebutted' && (
           <button
             onClick={handleResolve}
