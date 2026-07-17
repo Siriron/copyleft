@@ -1,7 +1,12 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { TransactionStatus } from 'genlayer-js/types';
-import { getReadClient, getWriteClient, getContractAddress } from './genlayerClient';
+import { getReadClient, getWriteClient, getContractAddress, ensureChain } from './genlayerClient';
 import { NetworkKey } from '../config/chains';
+
+const CONNECT_NAME: Record<NetworkKey, string> = {
+  studionet: 'studionet',
+  bradbury: 'testnetBradbury',
+};
 
 export interface DisputeRecord {
   dispute_id: number;
@@ -32,6 +37,25 @@ export function useWallet() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Silently pick up an already-authorized account on mount, and stay in
+  // sync if the person switches or disconnects accounts in their wallet —
+  // without this, every page load or account switch requires re-clicking
+  // "Connect Wallet" even when the wallet is already authorized.
+  useEffect(() => {
+    const eth = (window as any).ethereum;
+    if (!eth) return;
+
+    eth.request({ method: 'eth_accounts' }).then((accounts: string[]) => {
+      if (accounts[0]) setAccount(accounts[0] as `0x${string}`);
+    }).catch(() => {});
+
+    const handleAccountsChanged = (accounts: string[]) => {
+      setAccount((accounts[0] as `0x${string}`) || null);
+    };
+    eth.on?.('accountsChanged', handleAccountsChanged);
+    return () => eth.removeListener?.('accountsChanged', handleAccountsChanged);
+  }, []);
+
   const connect = useCallback(async () => {
     setConnecting(true);
     setError(null);
@@ -51,6 +75,21 @@ export function useWallet() {
   }, []);
 
   return { account, connect, connecting, error };
+}
+
+// Prepares a write client for a given network: switches/adds the chain in
+// the wallet first (so the transaction actually lands on the network the
+// UI says it will), then binds the client to that same chain.
+async function prepareWriteClient(network: NetworkKey, account: `0x${string}`) {
+  await ensureChain(network);
+  const client = getWriteClient(network, account);
+  // Some genlayer-js versions expose an explicit connect step to bind the
+  // client to the wallet's now-active chain; call it defensively so this
+  // still works on SDK versions that don't have it.
+  if (typeof (client as any).connect === 'function') {
+    await (client as any).connect(CONNECT_NAME[network]);
+  }
+  return client;
 }
 
 export function useCopyleftContract(network: NetworkKey) {
@@ -106,7 +145,7 @@ export function useCopyleftContract(network: NetworkKey) {
     setLoading(true);
     setError(null);
     try {
-      const client = getWriteClient(network, account);
+      const client = await prepareWriteClient(network, account);
       const hash = await client.writeContract({
         address: contractAddress as `0x${string}`,
         functionName: 'file_dispute',
@@ -133,7 +172,7 @@ export function useCopyleftContract(network: NetworkKey) {
     setLoading(true);
     setError(null);
     try {
-      const client = getWriteClient(network, account);
+      const client = await prepareWriteClient(network, account);
       const hash = await client.writeContract({
         address: contractAddress as `0x${string}`,
         functionName: 'rebut',
@@ -154,7 +193,7 @@ export function useCopyleftContract(network: NetworkKey) {
     setLoading(true);
     setError(null);
     try {
-      const client = getWriteClient(network, account);
+      const client = await prepareWriteClient(network, account);
       const hash = await client.writeContract({
         address: contractAddress as `0x${string}`,
         functionName: 'resolve_dispute',
@@ -175,7 +214,7 @@ export function useCopyleftContract(network: NetworkKey) {
     setLoading(true);
     setError(null);
     try {
-      const client = getWriteClient(network, account);
+      const client = await prepareWriteClient(network, account);
       const hash = await client.writeContract({
         address: contractAddress as `0x${string}`,
         functionName: 'request_cure',
@@ -194,3 +233,4 @@ export function useCopyleftContract(network: NetworkKey) {
 
   return { loading, error, listDisputes, getDispute, fileDispute, rebut, resolveDispute, requestCure };
 }
+
