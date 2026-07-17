@@ -1,0 +1,11 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#12253E"/>
+  <path d="M600 40 L600 590" stroke="#EAEBE3" stroke-width="2" stroke-dasharray="3 5" opacity="0.25"/>
+  <text x="80" y="220" font-family="Georgia, serif" font-size="72" fill="#EAEBE3" font-weight="600">Copyleft</text>
+  <text x="80" y="280" font-family="Arial, sans-serif" font-size="26" fill="#C7C9B8">GPL Compliance Arbitration</text>
+  <text x="80" y="340" font-family="Arial, sans-serif" font-size="20" fill="#8FA3B8" font-weight="300">Three-way evidence, judged against SPDX ground truth</text>
+  <path d="M120 420 C120 420 180 400 260 400 C340 400 340 440 340 440" stroke="#A47C1B" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <circle cx="120" cy="420" r="5" fill="#A47C1B"/>
+  <path d="M1080 460 C1080 460 1020 480 940 480 C860 480 860 440 860 440" stroke="#3C6E71" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <circle cx="1080" cy="460" r="5" fill="#3C6E71"/>
+</svg>
