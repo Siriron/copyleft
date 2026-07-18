@@ -14,6 +14,64 @@ If found in violation, the respondent may request a cure: GPLv3's real
 30-day-from-notice / 60-day-silent-reinstatement mechanic is mirrored
 as a contract-native remediation step distinct from a confidence-based
 appeal.
+
+---------------------------------------------------------------------
+NONDET / CONSENSUS DESIGN — confirmed against official GenLayer sources
+(docs.genlayer.com full-documentation.txt, error-handling, non-determinism,
+web-access, calling-llms pages; the canonical WizardOfCoin example; and a
+real deployed contract on explorer-studio.genlayer.com) after a repeated,
+confirmed live failure on Jul 17 2026. Every point below was cross-checked
+against 2+ independent official sources before being relied on:
+
+1. gl.nondet.web.get(url) returns a Response object (never a plain string).
+   Read actual text via response.body.decode("utf-8"); check
+   response.status_code for HTTP errors. Never iterate/slice the Response
+   object itself — doing so raises TypeError, which was the exact
+   confirmed root cause of the live failure (GenVM stderr showed
+   "TypeError: 'Response' object is not iterable" inside _sanitize()).
+
+2. gl.vm.run_nondet_unsafe(leader_fn, validator_fn) — called positionally,
+   never as leader_fn=/validator_fn= keywords (a separately-confirmed fatal
+   bug: passing them as keywords raises "got some positional-only arguments
+   passed as keyword arguments" at execution time).
+     - leader_fn returns the ALREADY-PARSED value (e.g. a dict, via
+       gl.nondet.exec_prompt(prompt, response_format="json")) — never a
+       raw JSON string for the caller to re-parse.
+     - validator_fn receives its argument as a gl.vm.Return | gl.vm.UserError
+       | gl.vm.VMError wrapper, NOT the plain value. isinstance(x, gl.vm.Return)
+       MUST be checked first; the actual leader value lives at x.calldata,
+       already decoded.
+     - The top-level run_nondet_unsafe(...) call itself returns that same
+       plain decoded value type directly (a dict here) — never a JSON
+       string to be json.loads()'d again.
+   A previous version of this contract got every one of these backwards:
+   treated leaders_res as a raw string, called json.loads() on values that
+   were already-decoded dicts or gl.vm.Return wrapper objects, and used
+   self._validating_dispute_id (a self-attribute) to smuggle dispute_id
+   into the validator closure instead of a direct closure — replaced here
+   with a direct lambda closure over dispute_id, exactly matching every
+   official example (WizardOfCoin, price-oracle, sentiment-scoring).
+
+3. Different validators can run different underlying LLM providers/models
+   (OpenAI, Ollama, etc. — confirmed via docs' transaction-structure and
+   LLM-integration pages). Exact JSON key names and value formatting can
+   legitimately vary between leader and validator re-derivation even on a
+   fully-correct contract. All LLM JSON output is parsed defensively with
+   key aliasing and numeric coercion (per GenLayer's documented "Defensive
+   Response Parsing" guidance), and the confidence_bps tolerance band is
+   sized accordingly.
+
+4. Official "Error Patterns for Consensus" guidance: for malformed/garbage
+   LLM output specifically, the validator should DISAGREE (return False),
+   forcing leader rotation — this is documented as correct, expected
+   behavior, not a gap to paper over. Every leader function here raises a
+   short, deterministic gl.vm.UserError when the model's output cannot be
+   salvaged even after alias/coercion attempts, and every validator treats
+   a non-Return leader result as a clean disagreement. The validator's own
+   independent re-derivation call is additionally wrapped so that if IT
+   fails to produce a parseable result, that also degrades to a clean
+   disagreement rather than an uncaught exception escaping validator_fn.
+---------------------------------------------------------------------
 """
 
 from genlayer import *
@@ -73,8 +131,14 @@ _MAX_TEXT_LEN = 2000
 _MAX_URL_LEN = 500
 
 
-def _sanitize(text: str, max_len: int = _MAX_TEXT_LEN) -> str:
+def _sanitize(text, max_len: int = _MAX_TEXT_LEN) -> str:
     if text is None:
+        return ""
+    if not isinstance(text, str):
+        # Defensive layer: callers should always hand us a real string, but
+        # never let a non-string (e.g. a stray Response object) reach the
+        # iteration below and crash leader/validator execution — degrade to
+        # an empty string instead of raising.
         return ""
     # strip control chars
     cleaned = "".join(ch for ch in text if ch.isprintable() or ch in ("\n", " "))
@@ -97,6 +161,141 @@ def _wrap_untrusted(label: str, text: str) -> str:
         f"{text}\n"
         f"<<<UNTRUSTED_{label}_END>>>"
     )
+
+
+def _fetch_text(url: str) -> str:
+    # gl.nondet.web.get() returns a Response object — read .body (bytes) and
+    # decode it; check .status_code for HTTP errors. A missing/dead/erroring
+    # fetch degrades to a clear marker string the model can reason about
+    # ("evidence unavailable"), per this contract's own charter that a
+    # missing fetch counts against whoever cited it — it must never raise
+    # and never crash leader/validator execution.
+    if not url:
+        return "[no URL provided]"
+    try:
+        response = gl.nondet.web.get(url)
+        status = getattr(response, "status_code", None)
+        if status is not None and status >= 400:
+            return f"[fetch failed: HTTP {status}]"
+        body = getattr(response, "body", None)
+        if body is None:
+            return "[fetch failed: empty response]"
+        if isinstance(body, bytes):
+            return body.decode("utf-8", errors="replace")
+        if isinstance(body, str):
+            return body
+        return "[fetch failed: unrecognized response format]"
+    except Exception:
+        return "[fetch failed: unreachable or errored]"
+
+
+# ---------------------------------------------------------------------------
+# Defensive LLM JSON field extraction (key aliasing + type coercion).
+#
+# Per GenLayer's documented "Defensive Response Parsing" guidance: even with
+# response_format="json", the exact key names and value formatting are not
+# guaranteed to match the prompt's requested schema, and different
+# validators may be running different underlying LLM providers. Extract
+# fields defensively; raise a short, deterministic gl.vm.UserError only if
+# the result is truly unsalvageable, so the validator can cleanly disagree
+# (per official "let malformed LLM output force leader rotation" guidance)
+# rather than an uncaught exception propagating with an unpredictable type
+# or message.
+# ---------------------------------------------------------------------------
+
+_VERDICT_ALIASES = ("verdict", "result", "decision", "outcome", "judgment")
+_CONFIDENCE_ALIASES = ("confidence_bps", "confidence", "score", "certainty")
+_REASONING_ALIASES = ("reasoning_summary", "reasoning", "explanation", "rationale", "summary")
+
+
+def _extract_field(data: dict, aliases) -> object:
+    for key in aliases:
+        if key in data and data[key] is not None:
+            return data[key]
+    return None
+
+
+def _coerce_verdict(raw, valid_options) -> str:
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raw = str(raw)
+    v = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    for opt in valid_options:
+        if v == opt or v == opt.replace("_", ""):
+            return opt
+    return ""
+
+
+def _coerce_confidence_bps(raw) -> int:
+    # Deliberately avoids float() entirely — even as a transient parsing
+    # step — per the TIER 1 rule that confidence/score values must never
+    # touch Python floats, since float behavior is not guaranteed bit-
+    # identical across different validator hardware/runtimes. Truncating
+    # instead of float-rounding loses at most sub-integer precision on a
+    # coarse 0-1000 score, which is immaterial given this field is only
+    # ever compared via a tolerance band, never an exact match.
+    if raw is None or isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        n = raw
+    else:
+        s = str(raw).strip()
+        if s.endswith("%"):
+            s = s[:-1].strip()
+        neg = s.startswith("-")
+        if neg or s.startswith("+"):
+            s = s[1:]
+        int_part = s.split(".")[0].strip()
+        if not int_part.isdigit():
+            return 0
+        n = int(int_part)
+        if neg:
+            n = -n
+    if n < 0:
+        return 0
+    if n > 1000:
+        return 1000
+    return n
+
+
+def _parse_leader_json(result, valid_verdicts) -> dict:
+    """
+    Defensively extract {verdict, confidence_bps, reasoning_summary} from an
+    exec_prompt(..., response_format="json") result. Raises gl.vm.UserError
+    with a short, deterministic message if the response is unsalvageable —
+    this is the documented, correct way to signal "malformed LLM output"
+    so the validator disagrees and a new leader is selected, rather than
+    silently fabricating or accepting a meaningless verdict.
+    """
+    if not isinstance(result, dict):
+        raise gl.vm.UserError("llm_non_dict_response")
+
+    raw_verdict = _extract_field(result, _VERDICT_ALIASES)
+    verdict = _coerce_verdict(raw_verdict, valid_verdicts)
+    if verdict == "":
+        raise gl.vm.UserError("llm_invalid_verdict")
+
+    raw_conf = _extract_field(result, _CONFIDENCE_ALIASES)
+    confidence_bps = _coerce_confidence_bps(raw_conf)
+
+    raw_reasoning = _extract_field(result, _REASONING_ALIASES)
+    reasoning_summary = raw_reasoning if isinstance(raw_reasoning, str) else ""
+
+    return {
+        "verdict": verdict,
+        "confidence_bps": confidence_bps,
+        "reasoning_summary": reasoning_summary,
+    }
+
+
+# Tolerance band for confidence_bps agreement between leader and validator.
+# Widened from an initial 150 to 200 given confirmed cross-model validator
+# diversity (different validators may run different LLM providers, which
+# can legitimately widen confidence-scoring variance beyond same-model
+# variance alone).
+_CONFIDENCE_TOLERANCE_BPS = 200
+_MIN_REASONING_LEN = 20
 
 
 # ---------------------------------------------------------------------------
@@ -214,15 +413,13 @@ class Copyleft(gl.Contract):
     # -----------------------------------------------------------------
     # Nondet leader/validator for primary resolution
     # -----------------------------------------------------------------
-    def _resolve_leader(self, dispute_id: u256) -> str:
+    def _resolve_leader(self, dispute_id: u256) -> dict:
         d = self.disputes[dispute_id]
 
-        spdx_url = (
-            f"https://spdx.org/licenses/{d.license_id}.html"
-        )
-        spdx_text = gl.nondet.web.get(spdx_url)
-        repo_evidence_text = gl.nondet.web.get(d.counter_evidence_url) if d.counter_evidence_url else ""
-        disputed_source_text = gl.nondet.web.get(d.downstream_repo_url)
+        spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
+        spdx_text = _fetch_text(spdx_url)
+        repo_evidence_text = _fetch_text(d.counter_evidence_url)
+        disputed_source_text = _fetch_text(d.downstream_repo_url)
 
         prompt = (
             f"{self.CHARTER}\n\n"
@@ -236,41 +433,59 @@ class Copyleft(gl.Contract):
             f"{_wrap_untrusted('REPO_EVIDENCE', _sanitize(repo_evidence_text, 4000))}\n\n"
             f"Disputed source path content (fetched): "
             f"{_wrap_untrusted('DISPUTED_SOURCE', _sanitize(disputed_source_text, 4000))}\n\n"
-            f"Respond ONLY with JSON: "
+            f"Respond ONLY with JSON using exactly these keys: "
             f'{{"verdict": "violation"|"compliant", "confidence_bps": <int 0-1000>, '
             f'"reasoning_summary": "<concise, tied to fetched evidence>"}}'
         )
 
-        result = gl.nondet.exec_prompt(prompt)
-        return result
+        result = gl.nondet.exec_prompt(prompt, response_format="json")
+        return _parse_leader_json(result, ("violation", "compliant"))
 
-    def _resolve_validator(self, leaders_res: str) -> bool:
-        # Independently re-derive by calling the leader function again and
-        # comparing STABLE FIELDS ONLY — never a shape/non-empty check.
-        rederived_raw = self._resolve_leader(self._validating_dispute_id)
+    def _resolve_validator(self, leaders_res, dispute_id: u256) -> bool:
+        if not isinstance(leaders_res, gl.vm.Return):
+            # Leader errored (most likely _parse_leader_json raised on
+            # unsalvageable LLM output). Per GenLayer's documented error
+            # pattern for LLM output specifically: disagree, forcing a
+            # rotation to a new leader — this is correct, expected
+            # behavior, not a gap.
+            return False
+
+        leader_data = leaders_res.calldata
+        if not isinstance(leader_data, dict):
+            return False
+
         try:
-            leader_parsed = json.loads(leaders_res)
-            rederived_parsed = json.loads(rederived_raw)
+            # Independently re-derive by calling the leader function again
+            # and comparing STABLE FIELDS ONLY — never a shape/non-empty
+            # check. Wrapped defensively so that if MY OWN re-derivation
+            # fails to produce a parseable result, that degrades to a
+            # clean disagreement rather than an uncaught exception
+            # escaping validator_fn itself.
+            my_data = self._resolve_leader(dispute_id)
         except Exception:
             return False
 
-        if "verdict" not in leader_parsed or "verdict" not in rederived_parsed:
-            return False
-        if leader_parsed["verdict"] not in ("violation", "compliant"):
-            return False
-        if leader_parsed["verdict"] != rederived_parsed["verdict"]:
+        if not isinstance(my_data, dict):
             return False
 
-        leader_conf = int(leader_parsed.get("confidence_bps", -1))
-        rederived_conf = int(rederived_parsed.get("confidence_bps", -1))
+        if leader_data.get("verdict") not in ("violation", "compliant"):
+            return False
+        if leader_data.get("verdict") != my_data.get("verdict"):
+            return False
+
+        try:
+            leader_conf = int(leader_data.get("confidence_bps", -1))
+            my_conf = int(my_data.get("confidence_bps", -1))
+        except (TypeError, ValueError):
+            return False
         if leader_conf < 0 or leader_conf > 1000:
             return False
         # tolerance band, not exact match, for the numeric field
-        if abs(leader_conf - rederived_conf) > 150:
+        if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
             return False
 
-        reasoning = leader_parsed.get("reasoning_summary", "")
-        if not isinstance(reasoning, str) or len(reasoning.strip()) < 20:
+        reasoning = leader_data.get("reasoning_summary", "")
+        if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
             # validates CONTENT presence, not just key presence — a one-word
             # or empty "reasoning_summary" fails, matching the staff-flagged
             # Sigil weakness of accepting any non-empty field
@@ -287,18 +502,17 @@ class Copyleft(gl.Contract):
         d = self.disputes[dispute_id]
         assert d.status == "rebutted", "dispute must be rebutted before resolution"
 
-        self._validating_dispute_id = dispute_id
-
-        result_str = gl.vm.run_nondet_unsafe(
+        result = gl.vm.run_nondet_unsafe(
             lambda: self._resolve_leader(dispute_id),
-            lambda leaders_res: self._resolve_validator(leaders_res),
+            lambda leaders_res: self._resolve_validator(leaders_res, dispute_id),
         )
-        parsed = json.loads(result_str)
+        # result is the consensus-agreed value, already a dict — never
+        # json.loads() it; storage writes happen strictly AFTER
+        # run_nondet_unsafe returns, never inside leader_fn/validator_fn.
 
-        # --- storage writes happen strictly AFTER run_nondet_unsafe returns ---
-        d.verdict = parsed["verdict"]
-        d.confidence_bps = u256(int(parsed["confidence_bps"]))
-        d.reasoning_summary = _sanitize(parsed.get("reasoning_summary", ""), 800)
+        d.verdict = result["verdict"]
+        d.confidence_bps = u256(int(result["confidence_bps"]))
+        d.reasoning_summary = _sanitize(result.get("reasoning_summary", ""), 800)
         d.resolved_at = gl.message_raw["datetime"]
 
         if d.verdict == "violation":
@@ -377,17 +591,16 @@ class Copyleft(gl.Contract):
         d.cure_commit_url = _sanitize(cure_commit_url, _MAX_URL_LEN)
         self.disputes[dispute_id] = d
 
-        self._validating_dispute_id = dispute_id
-        result_str = gl.vm.run_nondet_unsafe(
+        result = gl.vm.run_nondet_unsafe(
             lambda: self._check_cure_leader(dispute_id),
-            lambda leaders_res: self._check_cure_validator(leaders_res),
+            lambda leaders_res: self._check_cure_validator(leaders_res, dispute_id),
         )
-        parsed = json.loads(result_str)
+        # result is the consensus-agreed value, already a dict.
 
         d = self.disputes[dispute_id]
-        d.cure_verdict = parsed["verdict"]
-        d.cure_confidence_bps = u256(int(parsed["confidence_bps"]))
-        d.reasoning_summary = _sanitize(parsed.get("reasoning_summary", ""), 800)
+        d.cure_verdict = result["verdict"]
+        d.cure_confidence_bps = u256(int(result["confidence_bps"]))
+        d.reasoning_summary = _sanitize(result.get("reasoning_summary", ""), 800)
 
         cured = d.cure_verdict == "cured"
         d.status = "cured" if cured else "closed"
@@ -405,13 +618,13 @@ class Copyleft(gl.Contract):
             "status": d.status,
         })
 
-    def _check_cure_leader(self, dispute_id: u256) -> str:
+    def _check_cure_leader(self, dispute_id: u256) -> dict:
         d = self.disputes[dispute_id]
         spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
-        spdx_text = gl.nondet.web.get(spdx_url)
+        spdx_text = _fetch_text(spdx_url)
         # re-fetch NOW-CURRENT downstream file state, not the original snapshot
-        current_source_text = gl.nondet.web.get(d.downstream_repo_url)
-        cure_evidence_text = gl.nondet.web.get(d.cure_commit_url)
+        current_source_text = _fetch_text(d.downstream_repo_url)
+        cure_evidence_text = _fetch_text(d.cure_commit_url)
 
         prompt = (
             f"{self.CHARTER}\n\n"
@@ -428,35 +641,46 @@ class Copyleft(gl.Contract):
             f"{_wrap_untrusted('CURRENT_SOURCE', _sanitize(current_source_text, 4000))}\n\n"
             f"Cited remediation commit content (fetched): "
             f"{_wrap_untrusted('CURE_EVIDENCE', _sanitize(cure_evidence_text, 4000))}\n\n"
-            f'Respond ONLY with JSON: {{"verdict": "cured"|"not_cured", '
+            f"Respond ONLY with JSON using exactly these keys: "
+            f'{{"verdict": "cured"|"not_cured", '
             f'"confidence_bps": <int 0-1000>, "reasoning_summary": "<concise>"}}'
         )
-        return gl.nondet.exec_prompt(prompt)
+        result = gl.nondet.exec_prompt(prompt, response_format="json")
+        return _parse_leader_json(result, ("cured", "not_cured"))
 
-    def _check_cure_validator(self, leaders_res: str) -> bool:
-        # Same independent-re-derivation rigor as the primary path — applies
-        # here too, not just to resolve_dispute.
-        rederived_raw = self._check_cure_leader(self._validating_dispute_id)
+    def _check_cure_validator(self, leaders_res, dispute_id: u256) -> bool:
+        if not isinstance(leaders_res, gl.vm.Return):
+            return False
+
+        leader_data = leaders_res.calldata
+        if not isinstance(leader_data, dict):
+            return False
+
         try:
-            leader_parsed = json.loads(leaders_res)
-            rederived_parsed = json.loads(rederived_raw)
+            my_data = self._check_cure_leader(dispute_id)
         except Exception:
             return False
 
-        if leader_parsed.get("verdict") not in ("cured", "not_cured"):
-            return False
-        if leader_parsed["verdict"] != rederived_parsed.get("verdict"):
+        if not isinstance(my_data, dict):
             return False
 
-        leader_conf = int(leader_parsed.get("confidence_bps", -1))
-        rederived_conf = int(rederived_parsed.get("confidence_bps", -1))
+        if leader_data.get("verdict") not in ("cured", "not_cured"):
+            return False
+        if leader_data.get("verdict") != my_data.get("verdict"):
+            return False
+
+        try:
+            leader_conf = int(leader_data.get("confidence_bps", -1))
+            my_conf = int(my_data.get("confidence_bps", -1))
+        except (TypeError, ValueError):
+            return False
         if leader_conf < 0 or leader_conf > 1000:
             return False
-        if abs(leader_conf - rederived_conf) > 150:
+        if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
             return False
 
-        reasoning = leader_parsed.get("reasoning_summary", "")
-        if not isinstance(reasoning, str) or len(reasoning.strip()) < 20:
+        reasoning = leader_data.get("reasoning_summary", "")
+        if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
             return False
 
         return True
