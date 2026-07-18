@@ -56,10 +56,13 @@ against each other.
 
 ## Contracts
 
+Redeployed Jul 18 2026 with the confirmed `resolve_dispute` fix (see
+`docs/contracts.md` for what was wrong and what changed).
+
 | Network | Address | Deployment TX |
 |---|---|---|
-| StudioNet | `0xc843D529A317dA2E372D75D48011C4784855A82C` | [view ↗](https://explorer-studio.genlayer.com/tx/0x59030061815b0eb2fd8354270c79f25a742885f569ec0a92e375944d837d19ca) |
-| Bradbury (testnet) | `0xFb5a86cC64b780636515304710Ff691114B5953D` | [view ↗](https://explorer-bradbury.genlayer.com/tx/0xd082c8497eafa07b3eb6e7024ed3b12c094949899a2c00f4d7aee3db56273dba) |
+| StudioNet | `0x9261d128EA0813144395247e7d7b6f7e12B1bCeC` | [view ↗](https://explorer-studio.genlayer.com/tx/0xcc09b93c710532ff4c70900271c771de8614d54ede2443e976e601a15f2c61d6) |
+| Bradbury (testnet) | `0x58daEDCee44D1Cd2ae78f339A782CCA5B36314f0` | [view ↗](https://explorer-bradbury.genlayer.com/tx/0x217412a75efe48061c27011da78ed5c2b05df88ce092395fa2f1bb2053a98f1f) |
 
 ## Features
 
