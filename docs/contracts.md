@@ -1,11 +1,37 @@
 # Smart Contracts
 
+## Jul 18 2026 — confirmed bug fix, redeployed same day
+
+A live `resolve_dispute` failure (transaction finalized as `Undetermined`,
+all validators erroring identically) was traced to two confirmed bugs in
+the nondet/consensus handling, fixed in this version of `contracts/copyleft.py`:
+
+1. **`gl.nondet.web.get()` returns a `Response` object, not a string.**
+   The previous version passed this object directly into a text-processing
+   function, which crashed every validator identically with
+   `TypeError: 'Response' object is not iterable`. Fixed by reading
+   `response.body.decode("utf-8")` before any string operation touches it.
+
+2. **`run_nondet_unsafe`'s validator argument is a `gl.vm.Return` wrapper,
+   not the plain value.** The previous version treated it as a raw JSON
+   string and called `json.loads()` on values that were already-decoded
+   objects. Fixed to check `isinstance(leaders_res, gl.vm.Return)` first
+   and read the actual value from `leaders_res.calldata`, matching
+   GenLayer's official WizardOfCoin example and non-determinism docs
+   exactly.
+
+Both fixes were cross-verified against 8 independent official GenLayer
+documentation sources and a real deployed reference contract before being
+applied. Full design rationale is in the contract's own module docstring.
+
+Redeployed to both networks the same day — see addresses below.
+
 ## Deployed addresses
 
 | Network | Address | Deployment TX |
 |---|---|---|
-| StudioNet | `0xc843D529A317dA2E372D75D48011C4784855A82C` | [view tx](https://explorer-studio.genlayer.com/tx/0x59030061815b0eb2fd8354270c79f25a742885f569ec0a92e375944d837d19ca) |
-| Bradbury (testnet) | `0xFb5a86cC64b780636515304710Ff691114B5953D` | [view tx](https://explorer-bradbury.genlayer.com/tx/0xd082c8497eafa07b3eb6e7024ed3b12c094949899a2c00f4d7aee3db56273dba) |
+| StudioNet | `0x9261d128EA0813144395247e7d7b6f7e12B1bCeC` | [view tx](https://explorer-studio.genlayer.com/tx/0xcc09b93c710532ff4c70900271c771de8614d54ede2443e976e601a15f2c61d6) |
+| Bradbury (testnet) | `0x58daEDCee44D1Cd2ae78f339A782CCA5B36314f0` | [view tx](https://explorer-bradbury.genlayer.com/tx/0x217412a75efe48061c27011da78ed5c2b05df88ce092395fa2f1bb2053a98f1f) |
 
 ## `contracts/copyleft.py`
 
