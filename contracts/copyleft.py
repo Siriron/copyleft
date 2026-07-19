@@ -544,15 +544,24 @@ class Copyleft(gl.Contract):
         # whole for the dispute) + protocol pool cut. Deterministic split,
         # not chance-based: a fixed percentage, computed from the judged
         # outcome only.
+        #
+        # Value transfer confirmed via GenLayer's official "Working with
+        # Balances" documentation (TokenForwarder example): a pure GEN
+        # transfer with no method call uses
+        # gl.get_contract_at(address).emit_transfer(value=amount) — never
+        # .send(), which does not exist on the ContractAt proxy and was a
+        # confirmed live bug (AttributeError: '_ContractAt' object has no
+        # attribute 'send'), found only after the nondet/consensus fix let
+        # resolve_dispute reach this code for the first time.
         claimant_stake = int(d.claimant_stake)
         to_respondent = (claimant_stake * 80) // 100
         to_pool = claimant_stake - to_respondent
         self.protocol_pool = u256(int(self.protocol_pool) + to_pool)
         if to_respondent > 0:
-            gl.get_contract_at(d.respondent).send(u256(to_respondent))
+            gl.get_contract_at(d.respondent).emit_transfer(value=u256(to_respondent))
         # respondent's own counter-stake is simply returned
         if int(d.respondent_stake) > 0:
-            gl.get_contract_at(d.respondent).send(d.respondent_stake)
+            gl.get_contract_at(d.respondent).emit_transfer(value=d.respondent_stake)
 
     def _settle_violation_final(self, d: Dispute, cured: bool) -> None:
         respondent_stake = int(d.respondent_stake)
@@ -562,9 +571,9 @@ class Copyleft(gl.Contract):
             # returned (accusation was valid but resolved without penalty
             # beyond the cure itself, mirroring GPLv3's reinstatement).
             if respondent_stake > 0:
-                gl.get_contract_at(d.respondent).send(u256(respondent_stake))
+                gl.get_contract_at(d.respondent).emit_transfer(value=u256(respondent_stake))
             if claimant_stake > 0:
-                gl.get_contract_at(d.claimant).send(u256(claimant_stake))
+                gl.get_contract_at(d.claimant).emit_transfer(value=u256(claimant_stake))
         else:
             # uncured violation: respondent stake slashed -> claimant + pool,
             # claimant stake returned (accusation upheld).
@@ -572,9 +581,9 @@ class Copyleft(gl.Contract):
             to_pool = respondent_stake - to_claimant
             self.protocol_pool = u256(int(self.protocol_pool) + to_pool)
             if to_claimant > 0:
-                gl.get_contract_at(d.claimant).send(u256(to_claimant))
+                gl.get_contract_at(d.claimant).emit_transfer(value=u256(to_claimant))
             if claimant_stake > 0:
-                gl.get_contract_at(d.claimant).send(u256(claimant_stake))
+                gl.get_contract_at(d.claimant).emit_transfer(value=u256(claimant_stake))
 
     # -----------------------------------------------------------------
     # Cure mechanic (GPLv3-style remediation, distinct from a confidence-
