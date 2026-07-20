@@ -413,9 +413,18 @@ class Copyleft(gl.Contract):
     # -----------------------------------------------------------------
     # Nondet leader/validator for primary resolution
     # -----------------------------------------------------------------
-    def _resolve_leader(self, dispute_id: u256) -> dict:
-        d = self.disputes[dispute_id]
-
+    def _resolve_leader(self, d) -> dict:
+        # d is a gl.storage.copy_to_memory()'d Dispute record, passed in
+        # from resolve_dispute's plain deterministic body — NOT read from
+        # self.disputes here. Storage objects cannot be used directly
+        # inside nondet blocks (confirmed via GenLayer's official storage
+        # docs: "Storage objects cannot be used directly in nondet blocks
+        # ... Error - storage not accessible!"). This was a confirmed live
+        # issue: GenVM emitted "UserWarning: Detected pickling storage
+        # class. Reading storage in nondet mode is not supported" because
+        # this method previously did self.disputes[dispute_id] directly
+        # inside leader_fn. Fixed by copying the record to memory once, in
+        # resolve_dispute, before it crosses into run_nondet_unsafe.
         spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
         spdx_text = _fetch_text(spdx_url)
         repo_evidence_text = _fetch_text(d.counter_evidence_url)
@@ -441,7 +450,7 @@ class Copyleft(gl.Contract):
         result = gl.nondet.exec_prompt(prompt, response_format="json")
         return _parse_leader_json(result, ("violation", "compliant"))
 
-    def _resolve_validator(self, leaders_res, dispute_id: u256) -> bool:
+    def _resolve_validator(self, leaders_res, d) -> bool:
         if not isinstance(leaders_res, gl.vm.Return):
             # Leader errored (most likely _parse_leader_json raised on
             # unsalvageable LLM output). Per GenLayer's documented error
@@ -461,7 +470,7 @@ class Copyleft(gl.Contract):
             # fails to produce a parseable result, that degrades to a
             # clean disagreement rather than an uncaught exception
             # escaping validator_fn itself.
-            my_data = self._resolve_leader(dispute_id)
+            my_data = self._resolve_leader(d)
         except Exception:
             return False
 
@@ -502,9 +511,15 @@ class Copyleft(gl.Contract):
         d = self.disputes[dispute_id]
         assert d.status == "rebutted", "dispute must be rebutted before resolution"
 
+        # Copy the dispute record to memory HERE, in the plain
+        # deterministic body, before it crosses into run_nondet_unsafe —
+        # see _resolve_leader's docstring-comment for the full citation of
+        # why this is required.
+        d_mem = gl.storage.copy_to_memory(d)
+
         result = gl.vm.run_nondet_unsafe(
-            lambda: self._resolve_leader(dispute_id),
-            lambda leaders_res: self._resolve_validator(leaders_res, dispute_id),
+            lambda: self._resolve_leader(d_mem),
+            lambda leaders_res: self._resolve_validator(leaders_res, d_mem),
         )
         # result is the consensus-agreed value, already a dict — never
         # json.loads() it; storage writes happen strictly AFTER
@@ -600,9 +615,17 @@ class Copyleft(gl.Contract):
         d.cure_commit_url = _sanitize(cure_commit_url, _MAX_URL_LEN)
         self.disputes[dispute_id] = d
 
+        # Copy to memory AFTER the cure_commit_url write above (so the
+        # nondet block sees the just-submitted remediation URL — d is the
+        # same mutated object just written to storage, so this already
+        # reflects it) and BEFORE it crosses into run_nondet_unsafe. See
+        # _resolve_leader's comment for the full citation of why storage
+        # objects cannot be read directly inside leader_fn/validator_fn.
+        d_mem = gl.storage.copy_to_memory(d)
+
         result = gl.vm.run_nondet_unsafe(
-            lambda: self._check_cure_leader(dispute_id),
-            lambda leaders_res: self._check_cure_validator(leaders_res, dispute_id),
+            lambda: self._check_cure_leader(d_mem),
+            lambda leaders_res: self._check_cure_validator(leaders_res, d_mem),
         )
         # result is the consensus-agreed value, already a dict.
 
@@ -627,8 +650,9 @@ class Copyleft(gl.Contract):
             "status": d.status,
         })
 
-    def _check_cure_leader(self, dispute_id: u256) -> dict:
-        d = self.disputes[dispute_id]
+    def _check_cure_leader(self, d) -> dict:
+        # d is a gl.storage.copy_to_memory()'d Dispute record — see
+        # _resolve_leader's comment for why this is required.
         spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
         spdx_text = _fetch_text(spdx_url)
         # re-fetch NOW-CURRENT downstream file state, not the original snapshot
@@ -657,7 +681,7 @@ class Copyleft(gl.Contract):
         result = gl.nondet.exec_prompt(prompt, response_format="json")
         return _parse_leader_json(result, ("cured", "not_cured"))
 
-    def _check_cure_validator(self, leaders_res, dispute_id: u256) -> bool:
+    def _check_cure_validator(self, leaders_res, d) -> bool:
         if not isinstance(leaders_res, gl.vm.Return):
             return False
 
@@ -666,7 +690,7 @@ class Copyleft(gl.Contract):
             return False
 
         try:
-            my_data = self._check_cure_leader(dispute_id)
+            my_data = self._check_cure_leader(d)
         except Exception:
             return False
 
