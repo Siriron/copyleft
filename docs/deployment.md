@@ -2,13 +2,16 @@
 
 ## Live deployment record
 
-Redeployed Jul 18 2026 with the confirmed `resolve_dispute` fix — see
-`docs/contracts.md` for what was wrong and what changed.
+Current deployment (Jul 22 2026) includes all six confirmed fixes from
+the debugging history — nondet/consensus handling, value transfers, and
+a two-part storage-crossing-into-nondet issue — and has been live-tested
+end to end with confirmed clean execution. See `docs/contracts.md` for
+the full fix history and verification detail.
 
 | Network | Contract Address | Deployment TX |
 |---|---|---|
-| StudioNet | `0x9261d128EA0813144395247e7d7b6f7e12B1bCeC` | https://explorer-studio.genlayer.com/tx/0xcc09b93c710532ff4c70900271c771de8614d54ede2443e976e601a15f2c61d6 |
-| Bradbury (testnet) | `0x58daEDCee44D1Cd2ae78f339A782CCA5B36314f0` | https://explorer-bradbury.genlayer.com/tx/0x217412a75efe48061c27011da78ed5c2b05df88ce092395fa2f1bb2053a98f1f |
+| StudioNet | `0x076B412E3B1ff517E1fC0bEF8C90d769276555F1` | https://explorer-studio.genlayer.com/tx/0x2422f6fb8c7d2b9b3fb366e80b317978217464a7ca80ec49e1e832a03428f4a6 |
+| Bradbury (testnet) | `0x3D1EcE7272cb55410EC93036A9805Cb55fB8C94a` | https://explorer-bradbury.genlayer.com/tx/0xf42f88c48b231298aac589847e34fd8b8c978c3c46fe9403857600d33dc8bc8b |
 
 **Frontend:** https://copyleft.vercel.app/
 
@@ -60,24 +63,31 @@ and for any future redeploys.
 
 ## Post-deploy checklist
 
-Redeployed Jul 18 2026. Status as of the redeploy:
+Current deployment, Jul 22 2026. Status:
 
-- [x] Both network contract addresses populated in `.env` with the new
-      post-fix addresses (via env vars, never hardcoded elsewhere)
+- [x] Both network contract addresses set (via `VITE_CONTRACT_ADDRESS_*`
+      env vars — Vercel project settings for the live deployment, never
+      hardcoded elsewhere)
 - [x] Network toggle in the navbar switches correctly between Bradbury and
-      StudioNet (confirmed working in practice — a dispute filed while
-      StudioNet was selected correctly landed on StudioNet, not Bradbury)
-- [ ] `file_dispute` succeeds on both networks with a small test stake —
-      **not yet re-tested on this fresh deployment** (dispute IDs reset
-      to 1 on the new contract; prior confirmation was against the
-      superseded pre-fix contract)
-- [ ] `rebut` succeeds and moves status to `rebutted` — not yet re-tested
-      on this fresh deployment
-- [ ] `resolve_dispute` succeeds without an `Undetermined`/error result —
-      **this is the specific failure this redeploy fixes; it has not yet
-      been exercised against the new contract**. Confirm this actually
-      resolves cleanly on both networks before considering the fix proven,
-      not just theoretically correct.
-- [x] Explorer links in the docs page resolve to the correct new contract
+      StudioNet — confirmed working in practice
+- [x] `file_dispute` succeeds — confirmed live on this exact deployment
+- [x] `rebut` succeeds and moves status to `rebutted` — confirmed live on
+      this exact deployment
+- [x] `resolve_dispute` reaches a real consensus verdict (not
+      `Undetermined`, no crash) — confirmed live on this exact
+      deployment, stderr came back empty
+- [x] `resolve_dispute` completes a full **compliant-verdict settlement**
+      — confirmed live: contract's post-settlement balance exactly
+      matches the settlement formula's expected remainder, and both
+      `emit_transfer` payouts appear as finalized transactions in the
+      recipient wallet's own history
+- [x] The `copy_to_memory` + nested-function fix — confirmed live: the
+      `UserWarning: Detected pickling storage class` warning is
+      genuinely gone (empty stderr on a real `resolve_dispute` call)
+- [ ] `request_cure` (the cure/remediation path) — **not yet tested**
+- [ ] `_settle_violation_final` (the violation/slash settlement path) —
+      **not yet tested**; only the compliant-verdict path has been
+      exercised so far
+- [x] Explorer links in the docs page resolve to the correct contract
 - [x] README, docs/contracts.md, and docs/deployment.md updated with the
-      new addresses and TX links
+      current addresses and TX links
