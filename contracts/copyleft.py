@@ -298,6 +298,38 @@ _CONFIDENCE_TOLERANCE_BPS = 200
 _MIN_REASONING_LEN = 20
 
 
+# Fixed charter: the model is instructed to weigh evidence against the
+# SPDX canonical text, not against either party's characterization of it.
+#
+# Deliberately a MODULE-LEVEL constant, not a class attribute. A
+# class-body attribute with a type annotation (e.g. `CHARTER: str = ...`
+# inside `class Copyleft(gl.Contract)`) is treated as a genuine PERSISTENT
+# STORAGE FIELD per GenLayer's storage docs ("All persistent fields must
+# be declared in the class body and annotated with types"). Reading it via
+# `self.CHARTER` inside a nondet leader/validator function crosses a
+# storage-backed value into the nondet block — the exact same class of
+# issue as the dispute-record storage crossing fixed earlier, and a
+# confirmed contributor to a live, persistent
+# "UserWarning: Detected pickling storage class. Reading storage in
+# nondet mode is not supported" that remained even after the dispute
+# record was fixed. A module-level string constant is never storage-
+# backed and can be freely read from anywhere, including inside nondet
+# blocks, with zero risk of this warning.
+_CHARTER = (
+    "You are adjudicating a GPL-family license compliance dispute. "
+    "You must judge compliance using ONLY the three fetched evidence "
+    "sources: (1) the SPDX canonical license text, (2) the downstream "
+    "repository's own LICENSE/NOTICE file content, (3) the disputed "
+    "source path content. A missing, dead, or non-corroborating fetch "
+    "result counts against whoever cited that evidence. Do not accept "
+    "either party's free-text claim as fact if it is not corroborated "
+    "by the fetched evidence. Return a verdict of either 'violation' "
+    "or 'compliant', a confidence in basis points (0-1000), and a "
+    "concise reasoning summary tying the verdict to specific fetched "
+    "content."
+)
+
+
 # ---------------------------------------------------------------------------
 # Contract
 # ---------------------------------------------------------------------------
@@ -307,22 +339,6 @@ class Copyleft(gl.Contract):
     dispute_index: TreeMap[u256, DisputeIndexEntry]
     next_dispute_id: u256
     protocol_pool: u256
-
-    # Fixed charter: the model is instructed to weigh evidence against the
-    # SPDX canonical text, not against either party's characterization of it.
-    CHARTER: str = (
-        "You are adjudicating a GPL-family license compliance dispute. "
-        "You must judge compliance using ONLY the three fetched evidence "
-        "sources: (1) the SPDX canonical license text, (2) the downstream "
-        "repository's own LICENSE/NOTICE file content, (3) the disputed "
-        "source path content. A missing, dead, or non-corroborating fetch "
-        "result counts against whoever cited that evidence. Do not accept "
-        "either party's free-text claim as fact if it is not corroborated "
-        "by the fetched evidence. Return a verdict of either 'violation' "
-        "or 'compliant', a confidence in basis points (0-1000), and a "
-        "concise reasoning summary tying the verdict to specific fetched "
-        "content."
-    )
 
     def __init__(self):
         self.next_dispute_id = u256(1)
@@ -411,98 +427,6 @@ class Copyleft(gl.Contract):
         return json.dumps({"dispute_id": int(dispute_id), "status": "rebutted"})
 
     # -----------------------------------------------------------------
-    # Nondet leader/validator for primary resolution
-    # -----------------------------------------------------------------
-    def _resolve_leader(self, d) -> dict:
-        # d is a gl.storage.copy_to_memory()'d Dispute record, passed in
-        # from resolve_dispute's plain deterministic body — NOT read from
-        # self.disputes here. Storage objects cannot be used directly
-        # inside nondet blocks (confirmed via GenLayer's official storage
-        # docs: "Storage objects cannot be used directly in nondet blocks
-        # ... Error - storage not accessible!"). This was a confirmed live
-        # issue: GenVM emitted "UserWarning: Detected pickling storage
-        # class. Reading storage in nondet mode is not supported" because
-        # this method previously did self.disputes[dispute_id] directly
-        # inside leader_fn. Fixed by copying the record to memory once, in
-        # resolve_dispute, before it crosses into run_nondet_unsafe.
-        spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
-        spdx_text = _fetch_text(spdx_url)
-        repo_evidence_text = _fetch_text(d.counter_evidence_url)
-        disputed_source_text = _fetch_text(d.downstream_repo_url)
-
-        prompt = (
-            f"{self.CHARTER}\n\n"
-            f"Cited license: {_sanitize(d.license_id, 50)}\n"
-            f"Alleged clause violated: {_wrap_untrusted('ALLEGED_CLAUSE', d.alleged_clause)}\n"
-            f"Claimant statement: {_wrap_untrusted('CLAIM', d.claim_text)}\n"
-            f"Respondent statement: {_wrap_untrusted('REBUTTAL', d.rebuttal_text)}\n\n"
-            f"SPDX canonical license text (fetched): "
-            f"{_wrap_untrusted('SPDX_TEXT', _sanitize(spdx_text, 6000))}\n\n"
-            f"Downstream repo LICENSE/NOTICE evidence (fetched): "
-            f"{_wrap_untrusted('REPO_EVIDENCE', _sanitize(repo_evidence_text, 4000))}\n\n"
-            f"Disputed source path content (fetched): "
-            f"{_wrap_untrusted('DISPUTED_SOURCE', _sanitize(disputed_source_text, 4000))}\n\n"
-            f"Respond ONLY with JSON using exactly these keys: "
-            f'{{"verdict": "violation"|"compliant", "confidence_bps": <int 0-1000>, '
-            f'"reasoning_summary": "<concise, tied to fetched evidence>"}}'
-        )
-
-        result = gl.nondet.exec_prompt(prompt, response_format="json")
-        return _parse_leader_json(result, ("violation", "compliant"))
-
-    def _resolve_validator(self, leaders_res, d) -> bool:
-        if not isinstance(leaders_res, gl.vm.Return):
-            # Leader errored (most likely _parse_leader_json raised on
-            # unsalvageable LLM output). Per GenLayer's documented error
-            # pattern for LLM output specifically: disagree, forcing a
-            # rotation to a new leader — this is correct, expected
-            # behavior, not a gap.
-            return False
-
-        leader_data = leaders_res.calldata
-        if not isinstance(leader_data, dict):
-            return False
-
-        try:
-            # Independently re-derive by calling the leader function again
-            # and comparing STABLE FIELDS ONLY — never a shape/non-empty
-            # check. Wrapped defensively so that if MY OWN re-derivation
-            # fails to produce a parseable result, that degrades to a
-            # clean disagreement rather than an uncaught exception
-            # escaping validator_fn itself.
-            my_data = self._resolve_leader(d)
-        except Exception:
-            return False
-
-        if not isinstance(my_data, dict):
-            return False
-
-        if leader_data.get("verdict") not in ("violation", "compliant"):
-            return False
-        if leader_data.get("verdict") != my_data.get("verdict"):
-            return False
-
-        try:
-            leader_conf = int(leader_data.get("confidence_bps", -1))
-            my_conf = int(my_data.get("confidence_bps", -1))
-        except (TypeError, ValueError):
-            return False
-        if leader_conf < 0 or leader_conf > 1000:
-            return False
-        # tolerance band, not exact match, for the numeric field
-        if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
-            return False
-
-        reasoning = leader_data.get("reasoning_summary", "")
-        if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
-            # validates CONTENT presence, not just key presence — a one-word
-            # or empty "reasoning_summary" fails, matching the staff-flagged
-            # Sigil weakness of accepting any non-empty field
-            return False
-
-        return True
-
-    # -----------------------------------------------------------------
     # Write: resolve_dispute
     # -----------------------------------------------------------------
     @gl.public.write
@@ -512,15 +436,119 @@ class Copyleft(gl.Contract):
         assert d.status == "rebutted", "dispute must be rebutted before resolution"
 
         # Copy the dispute record to memory HERE, in the plain
-        # deterministic body, before it crosses into run_nondet_unsafe —
-        # see _resolve_leader's docstring-comment for the full citation of
-        # why this is required.
+        # deterministic body, before it crosses into run_nondet_unsafe.
+        # Storage objects cannot be used directly inside nondet blocks
+        # (confirmed via GenLayer's official storage docs). This alone
+        # was NOT sufficient though — see the nested-function structure
+        # below for the second, deeper fix.
         d_mem = gl.storage.copy_to_memory(d)
 
-        result = gl.vm.run_nondet_unsafe(
-            lambda: self._resolve_leader(d_mem),
-            lambda leaders_res: self._resolve_validator(leaders_res, d_mem),
-        )
+        # leader_fn/validator_fn are defined as NESTED FUNCTIONS here,
+        # closing only over d_mem and module-level constants/helpers
+        # (_CHARTER, _sanitize, _wrap_untrusted, _fetch_text,
+        # _parse_leader_json, _CONFIDENCE_TOLERANCE_BPS,
+        # _MIN_REASONING_LEN) — NEVER referencing `self` anywhere inside
+        # their bodies. This exactly matches GenLayer's official
+        # WizardOfCoin example structure.
+        #
+        # This was a confirmed, real, two-layer bug (Jul 19-20 2026): a
+        # persistent "UserWarning: Detected pickling storage class.
+        # Reading storage in nondet mode is not supported" remained even
+        # after the dispute record itself was fixed to use
+        # copy_to_memory, because the leader/validator were still defined
+        # as INSTANCE METHODS (`def _resolve_leader(self, d):`) called via
+        # `self._resolve_leader(...)` — a bound-method call that carries
+        # `self` (the whole contract instance, which owns every storage
+        # field including `disputes`) into the nondet closure regardless
+        # of which specific field the method body touches. On top of that,
+        # `self.CHARTER` was itself an accidental persistent storage field
+        # (any class-body attribute with a type annotation is storage-
+        # backed per GenLayer's storage docs), compounding the same issue.
+        # A real GenLayer developer's documented experience states this
+        # plainly: "you cannot access self inside a non-deterministic
+        # block." Fixed by removing `self` from the picture entirely:
+        # nested functions, module-level constants, no bound-method calls.
+        def leader_fn():
+            spdx_url = f"https://spdx.org/licenses/{d_mem.license_id}.html"
+            spdx_text = _fetch_text(spdx_url)
+            repo_evidence_text = _fetch_text(d_mem.counter_evidence_url)
+            disputed_source_text = _fetch_text(d_mem.downstream_repo_url)
+
+            prompt = (
+                f"{_CHARTER}\n\n"
+                f"Cited license: {_sanitize(d_mem.license_id, 50)}\n"
+                f"Alleged clause violated: {_wrap_untrusted('ALLEGED_CLAUSE', d_mem.alleged_clause)}\n"
+                f"Claimant statement: {_wrap_untrusted('CLAIM', d_mem.claim_text)}\n"
+                f"Respondent statement: {_wrap_untrusted('REBUTTAL', d_mem.rebuttal_text)}\n\n"
+                f"SPDX canonical license text (fetched): "
+                f"{_wrap_untrusted('SPDX_TEXT', _sanitize(spdx_text, 6000))}\n\n"
+                f"Downstream repo LICENSE/NOTICE evidence (fetched): "
+                f"{_wrap_untrusted('REPO_EVIDENCE', _sanitize(repo_evidence_text, 4000))}\n\n"
+                f"Disputed source path content (fetched): "
+                f"{_wrap_untrusted('DISPUTED_SOURCE', _sanitize(disputed_source_text, 4000))}\n\n"
+                f"Respond ONLY with JSON using exactly these keys: "
+                f'{{"verdict": "violation"|"compliant", "confidence_bps": <int 0-1000>, '
+                f'"reasoning_summary": "<concise, tied to fetched evidence>"}}'
+            )
+
+            result = gl.nondet.exec_prompt(prompt, response_format="json")
+            return _parse_leader_json(result, ("violation", "compliant"))
+
+        def validator_fn(leaders_res) -> bool:
+            if not isinstance(leaders_res, gl.vm.Return):
+                # Leader errored (most likely _parse_leader_json raised on
+                # unsalvageable LLM output). Per GenLayer's documented
+                # error pattern for LLM output specifically: disagree,
+                # forcing a rotation to a new leader — this is correct,
+                # expected behavior, not a gap.
+                return False
+
+            leader_data = leaders_res.calldata
+            if not isinstance(leader_data, dict):
+                return False
+
+            try:
+                # Independently re-derive by calling the leader function
+                # again (the nested function directly, never a bound
+                # method) and comparing STABLE FIELDS ONLY — never a
+                # shape/non-empty check. Wrapped defensively so that if
+                # MY OWN re-derivation fails to produce a parseable
+                # result, that degrades to a clean disagreement rather
+                # than an uncaught exception escaping validator_fn itself.
+                my_data = leader_fn()
+            except Exception:
+                return False
+
+            if not isinstance(my_data, dict):
+                return False
+
+            if leader_data.get("verdict") not in ("violation", "compliant"):
+                return False
+            if leader_data.get("verdict") != my_data.get("verdict"):
+                return False
+
+            try:
+                leader_conf = int(leader_data.get("confidence_bps", -1))
+                my_conf = int(my_data.get("confidence_bps", -1))
+            except (TypeError, ValueError):
+                return False
+            if leader_conf < 0 or leader_conf > 1000:
+                return False
+            # tolerance band, not exact match, for the numeric field
+            if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
+                return False
+
+            reasoning = leader_data.get("reasoning_summary", "")
+            if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
+                # validates CONTENT presence, not just key presence — a
+                # one-word or empty "reasoning_summary" fails, matching
+                # the staff-flagged Sigil weakness of accepting any
+                # non-empty field
+                return False
+
+            return True
+
+        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         # result is the consensus-agreed value, already a dict — never
         # json.loads() it; storage writes happen strictly AFTER
         # run_nondet_unsafe returns, never inside leader_fn/validator_fn.
@@ -618,15 +646,80 @@ class Copyleft(gl.Contract):
         # Copy to memory AFTER the cure_commit_url write above (so the
         # nondet block sees the just-submitted remediation URL — d is the
         # same mutated object just written to storage, so this already
-        # reflects it) and BEFORE it crosses into run_nondet_unsafe. See
-        # _resolve_leader's comment for the full citation of why storage
-        # objects cannot be read directly inside leader_fn/validator_fn.
+        # reflects it) and BEFORE it crosses into run_nondet_unsafe.
         d_mem = gl.storage.copy_to_memory(d)
 
-        result = gl.vm.run_nondet_unsafe(
-            lambda: self._check_cure_leader(d_mem),
-            lambda leaders_res: self._check_cure_validator(leaders_res, d_mem),
-        )
+        # Nested functions, no `self` access anywhere inside — see
+        # resolve_dispute's comment for the full citation of why this
+        # structure (not instance methods called via self.something())
+        # is required.
+        def leader_fn():
+            spdx_url = f"https://spdx.org/licenses/{d_mem.license_id}.html"
+            spdx_text = _fetch_text(spdx_url)
+            # re-fetch NOW-CURRENT downstream file state, not the original snapshot
+            current_source_text = _fetch_text(d_mem.downstream_repo_url)
+            cure_evidence_text = _fetch_text(d_mem.cure_commit_url)
+
+            prompt = (
+                f"{_CHARTER}\n\n"
+                f"A prior verdict found a GPL-family license violation for this "
+                f"repository. The respondent has submitted a remediation commit. "
+                f"Judge ONLY whether the remediation, as evidenced by the current "
+                f"fetched repository state and the cited commit, now satisfies the "
+                f"originally violated clause. This mirrors GPLv3's cure provision: "
+                f"a first-time violator gets a window to fix the violation.\n\n"
+                f"Originally alleged clause: {_wrap_untrusted('ALLEGED_CLAUSE', d_mem.alleged_clause)}\n\n"
+                f"SPDX canonical license text (fetched): "
+                f"{_wrap_untrusted('SPDX_TEXT', _sanitize(spdx_text, 6000))}\n\n"
+                f"Current downstream repo state (fetched): "
+                f"{_wrap_untrusted('CURRENT_SOURCE', _sanitize(current_source_text, 4000))}\n\n"
+                f"Cited remediation commit content (fetched): "
+                f"{_wrap_untrusted('CURE_EVIDENCE', _sanitize(cure_evidence_text, 4000))}\n\n"
+                f"Respond ONLY with JSON using exactly these keys: "
+                f'{{"verdict": "cured"|"not_cured", '
+                f'"confidence_bps": <int 0-1000>, "reasoning_summary": "<concise>"}}'
+            )
+            result = gl.nondet.exec_prompt(prompt, response_format="json")
+            return _parse_leader_json(result, ("cured", "not_cured"))
+
+        def validator_fn(leaders_res) -> bool:
+            if not isinstance(leaders_res, gl.vm.Return):
+                return False
+
+            leader_data = leaders_res.calldata
+            if not isinstance(leader_data, dict):
+                return False
+
+            try:
+                my_data = leader_fn()
+            except Exception:
+                return False
+
+            if not isinstance(my_data, dict):
+                return False
+
+            if leader_data.get("verdict") not in ("cured", "not_cured"):
+                return False
+            if leader_data.get("verdict") != my_data.get("verdict"):
+                return False
+
+            try:
+                leader_conf = int(leader_data.get("confidence_bps", -1))
+                my_conf = int(my_data.get("confidence_bps", -1))
+            except (TypeError, ValueError):
+                return False
+            if leader_conf < 0 or leader_conf > 1000:
+                return False
+            if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
+                return False
+
+            reasoning = leader_data.get("reasoning_summary", "")
+            if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
+                return False
+
+            return True
+
+        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         # result is the consensus-agreed value, already a dict.
 
         d = self.disputes[dispute_id]
@@ -649,74 +742,6 @@ class Copyleft(gl.Contract):
             "confidence_bps": int(d.cure_confidence_bps),
             "status": d.status,
         })
-
-    def _check_cure_leader(self, d) -> dict:
-        # d is a gl.storage.copy_to_memory()'d Dispute record — see
-        # _resolve_leader's comment for why this is required.
-        spdx_url = f"https://spdx.org/licenses/{d.license_id}.html"
-        spdx_text = _fetch_text(spdx_url)
-        # re-fetch NOW-CURRENT downstream file state, not the original snapshot
-        current_source_text = _fetch_text(d.downstream_repo_url)
-        cure_evidence_text = _fetch_text(d.cure_commit_url)
-
-        prompt = (
-            f"{self.CHARTER}\n\n"
-            f"A prior verdict found a GPL-family license violation for this "
-            f"repository. The respondent has submitted a remediation commit. "
-            f"Judge ONLY whether the remediation, as evidenced by the current "
-            f"fetched repository state and the cited commit, now satisfies the "
-            f"originally violated clause. This mirrors GPLv3's cure provision: "
-            f"a first-time violator gets a window to fix the violation.\n\n"
-            f"Originally alleged clause: {_wrap_untrusted('ALLEGED_CLAUSE', d.alleged_clause)}\n\n"
-            f"SPDX canonical license text (fetched): "
-            f"{_wrap_untrusted('SPDX_TEXT', _sanitize(spdx_text, 6000))}\n\n"
-            f"Current downstream repo state (fetched): "
-            f"{_wrap_untrusted('CURRENT_SOURCE', _sanitize(current_source_text, 4000))}\n\n"
-            f"Cited remediation commit content (fetched): "
-            f"{_wrap_untrusted('CURE_EVIDENCE', _sanitize(cure_evidence_text, 4000))}\n\n"
-            f"Respond ONLY with JSON using exactly these keys: "
-            f'{{"verdict": "cured"|"not_cured", '
-            f'"confidence_bps": <int 0-1000>, "reasoning_summary": "<concise>"}}'
-        )
-        result = gl.nondet.exec_prompt(prompt, response_format="json")
-        return _parse_leader_json(result, ("cured", "not_cured"))
-
-    def _check_cure_validator(self, leaders_res, d) -> bool:
-        if not isinstance(leaders_res, gl.vm.Return):
-            return False
-
-        leader_data = leaders_res.calldata
-        if not isinstance(leader_data, dict):
-            return False
-
-        try:
-            my_data = self._check_cure_leader(d)
-        except Exception:
-            return False
-
-        if not isinstance(my_data, dict):
-            return False
-
-        if leader_data.get("verdict") not in ("cured", "not_cured"):
-            return False
-        if leader_data.get("verdict") != my_data.get("verdict"):
-            return False
-
-        try:
-            leader_conf = int(leader_data.get("confidence_bps", -1))
-            my_conf = int(my_data.get("confidence_bps", -1))
-        except (TypeError, ValueError):
-            return False
-        if leader_conf < 0 or leader_conf > 1000:
-            return False
-        if abs(leader_conf - my_conf) > _CONFIDENCE_TOLERANCE_BPS:
-            return False
-
-        reasoning = leader_data.get("reasoning_summary", "")
-        if not isinstance(reasoning, str) or len(reasoning.strip()) < _MIN_REASONING_LEN:
-            return False
-
-        return True
 
     # -----------------------------------------------------------------
     # Views
