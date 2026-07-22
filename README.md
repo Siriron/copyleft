@@ -56,13 +56,16 @@ against each other.
 
 ## Contracts
 
-Redeployed Jul 18 2026 with the confirmed `resolve_dispute` fix (see
-`docs/contracts.md` for what was wrong and what changed).
+Current deployment (Jul 22 2026) includes every confirmed fix from the
+debugging history — nondet/consensus handling, value transfers, and a
+storage-crossing-into-nondet issue — and has been live-tested end to end
+(file → rebut → resolve → settlement) with confirmed clean execution and
+correct GEN payouts. See `docs/contracts.md` for the full fix history.
 
 | Network | Address | Deployment TX |
 |---|---|---|
-| StudioNet | `0x9261d128EA0813144395247e7d7b6f7e12B1bCeC` | [view ↗](https://explorer-studio.genlayer.com/tx/0xcc09b93c710532ff4c70900271c771de8614d54ede2443e976e601a15f2c61d6) |
-| Bradbury (testnet) | `0x58daEDCee44D1Cd2ae78f339A782CCA5B36314f0` | [view ↗](https://explorer-bradbury.genlayer.com/tx/0x217412a75efe48061c27011da78ed5c2b05df88ce092395fa2f1bb2053a98f1f) |
+| StudioNet | `0x076B412E3B1ff517E1fC0bEF8C90d769276555F1` | [view ↗](https://explorer-studio.genlayer.com/tx/0x2422f6fb8c7d2b9b3fb366e80b317978217464a7ca80ec49e1e832a03428f4a6) |
+| Bradbury (testnet) | `0x3D1EcE7272cb55410EC93036A9805Cb55fB8C94a` | [view ↗](https://explorer-bradbury.genlayer.com/tx/0xf42f88c48b231298aac589847e34fd8b8c978c3c46fe9403857600d33dc8bc8b) |
 
 ## Features
 
@@ -93,9 +96,12 @@ npm install
 npm run dev
 ```
 
-Contract addresses are pre-filled in the committed `.env` — both are
-public, deployed addresses, not secrets. `.env.example` documents the
-required keys for anyone setting up a fresh deployment.
+Contract addresses are set via `VITE_CONTRACT_ADDRESS_STUDIONET` and
+`VITE_CONTRACT_ADDRESS_BRADBURY` environment variables (see
+`.env.example` for the required keys). The live deployment sets these in
+Vercel's project environment variables rather than a committed `.env` —
+both values are public, deployed contract addresses, not secrets, so
+either approach works.
 
 ## Documentation
 
